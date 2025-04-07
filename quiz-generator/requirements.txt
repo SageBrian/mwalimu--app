@@ -21,3 +21,5 @@ psycopg2-binary aiopg
 pydantic-ai
 
 instructor>=0.4.8
+
+pydantic_ai>=0.1.0

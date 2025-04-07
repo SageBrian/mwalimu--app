@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 import json
 
+
 # --- Load Environment Variables ---
 load_dotenv()
 if not os.getenv("OPENAI_API_KEY"):
@@ -27,8 +28,8 @@ except ImportError:
     print("Please install pydantic-ai: pip install pydantic-ai")
     exit()
 # Using OpenAI directly from pydantic-ai if available, or fallback
-#llm_engine = OpenAIModel( "gpt-4o-mini", provider=OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY")))
-llm_engine = GeminiModel( "gemini-2.0-flash", provider='google-gla')
+llm_engine = OpenAIModel( "gpt-4o-mini", provider=OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY")))
+#llm_engine = GeminiModel( "gemini-2.0-flash", provider='google-gla')
 #from pydantic_ai.models import OpenAI
 from pydantic_ai import Agent as PydanticAIAgent
 # LangGraph imports
@@ -77,18 +78,8 @@ class QuizGeneratorAgentOutput(BaseModel):
     message_to_user: Optional[str] = Field(None, description="A message to the user, seeking clarification if needed or anything else to help the user understand the quiz better.")
     quiz: Optional[List[QuizQuestion]] = Field(description="A list of quiz questions, each with text, options, and the correct answer.", min_items=1, max_items=5) # Adjusted min/max items
  
-class AnswerCheckerAgentInput(BaseModel):
-    user_response: str # The user's answer attempt
-    conversation_history: List[Dict[str, str]] = Field(default_factory=list)
-    # Context needed for checking:
-    question_text: str = Field(description="The specific question the user was answering.")
-    correct_answer: str = Field(description="The correct answer to the question.")
 
-class AnswerCheckerAgentOutput(BaseModel):
-    message_to_user: str = Field(description="Feedback to the user (e.g., 'Correct!', 'Incorrect, the answer was X').")
-    is_correct: bool = Field(description="Whether the user's answer matches the correct answer.")
-    user_answer: str # Store what the agent interpreted as the user's answer
-    correct_answer: str # Reiterate the correct answer
+
 
 # --- PydanticAI Agent Definitions ---
 
@@ -130,10 +121,36 @@ welcome_agent = PydanticAIAgent(
 
         DO NOT ROUTE TO THE QUIZ GENERATOR AGENT IF YOU DO NOT THE INFORMATION BELOW:
         - Topic (Mandatory)
-        - Message to agent (Optional, to help the quiz_generator_agent understand the user's request better)
         - Number of questions (Optional, default is 3)
         - Difficulty (Optional, default is "medium")
 
+        Once you have all the information you need, route to the quiz_generator_agent with the quiz parameters.
+        If you do not have all the information you need, ask the user for more information: 
+        Do not pester the user for information, you can proceed to hand-off to the quiz_generator_agent with the information you have;
+
+        When ready to hand-off to the quiz_generator_agent, set the 'agent_to_use' field to 'quiz_generator_agent' and the 'quiz_parameters' field to the quiz parameters.
+        Do not communicate with the user about the hand-off, just do it.
+        
+        Example of handoff to quiz_generator_agent:
+       {
+            "message_to_user": null,
+            "agent_to_use": "quiz_generator_agent",
+            "quiz_parameters": {
+                "topic": "Tanzania",
+                "num_questions": 5,
+                "difficulty": "medium",
+                "message_to_agent": null
+            }
+        OR
+        Example of message to user:
+        {
+            "message_to_user": "I need more information. What topic would you like the quiz about?",
+            "agent_to_use": null,
+            "quiz_parameters": null
+        }
+
+        NOTE: You must either set the 'agent_to_use' field to 'quiz_generator_agent' or the 'message_to_user' field to a message to the user.
+        You MUST NOT set both fields to non-null values.
     """
 )
 
@@ -167,28 +184,6 @@ quiz_generator_agent = PydanticAIAgent(
             "quiz": [{"question": "...", "options": [...], "correct_answer": "..."}]
         }
     """
-    #description="Generates a multiple-choice quiz based on a user-provided topic."
-)
-
-
-answer_checker_agent = PydanticAIAgent(
-    model=llm_engine,
-    deps_type=AnswerCheckerAgentInput,
-    result_type=AnswerCheckerAgentOutput,
-    system_prompt="""
-        You are the 'Answer Checker Agent'. You receive the user's response (their attempted answer), the original question text, and the correct answer text.
-        Your tasks are:
-        1. Compare the 'user_response' to the provided 'correct_answer'. Perform a reasonably flexible comparison (e.g., ignore case, minor typos if obvious).
-        2. Determine if the user's answer is correct ('is_correct' = True) or incorrect ('is_correct' = False).
-        3. Populate the 'AnswerCheckerAgentOutput' schema accurately:
-            - 'is_correct': Boolean result of the comparison.
-            - 'user_answer': The user's response received in the input.
-            - 'correct_answer': The correct answer received in the input.
-            - 'message_to_user': Provide feedback.
-                - If correct: "Correct!", "Well done!", etc.
-                - If incorrect: "Sorry, that's incorrect. The correct answer was: [correct_answer]."
-    """,
-    #description="Checks if the user's answer to a specific quiz question is correct."
 )
 
 # --- Async PydanticAI Agent Runner Functions ---
@@ -254,43 +249,6 @@ async def run_quiz_generator_agent(input_data: dict) -> QuizGeneratorAgentOutput
             )]
         )
 
-async def run_answer_checker_agent(input_data: dict) -> AnswerCheckerAgentOutput:
-    """Runs the Answer Checker agent asynchronously."""
-    print(f"DEBUG: Running Answer Checker Agent with input: {input_data}")
-    try:
-        # Ensure required context is present
-        if 'question_text' not in input_data or 'correct_answer' not in input_data:
-            raise ValueError("Answer Checker requires 'question_text' and 'correct_answer' in input_data.")
-
-        input_model_instance = AnswerCheckerAgentInput(**input_data)
-        result = await answer_checker_agent.run(input_model_instance)
-        print(f"DEBUG: Answer Checker Agent Raw Result: {result}")
-
-        if isinstance(result, AnswerCheckerAgentOutput):
-             return result
-        else:
-             # Handle potential nested structure or parse
-            if hasattr(result, 'data') and isinstance(result.data, AnswerCheckerAgentOutput):
-                 return result.data
-            elif hasattr(result, 'result') and isinstance(result.result, AnswerCheckerAgentOutput):
-                 return result.result
-            else:
-                try:
-                    if isinstance(result, str): result = json.loads(result)
-                    if isinstance(result, dict): return AnswerCheckerAgentOutput(**result)
-                except (json.JSONDecodeError, TypeError, ValueError):
-                     raise TypeError(f"Unexpected/unparseable result type from Answer Check agent: {type(result)}, Content: {result}")
-            raise TypeError(f"Unexpected result type from Answer Checker agent: {type(result)}")
-
-    except Exception as e:
-        print(f"ERROR in run_answer_checker_agent: {e}")
-        # Fallback: Generate an error message adhering to schema
-        return AnswerCheckerAgentOutput(
-            message_to_user=f"Sorry, I couldn't check your answer due to an error: {e}",
-            is_correct=False, # Default to false on error
-            user_answer=input_data.get("user_response", "Unknown"),
-            correct_answer=input_data.get("correct_answer", "Unknown")
-        )
 
 
 # --- LangGraph State Definition ---
@@ -307,7 +265,7 @@ class AppState(BaseModel):
     # Agent-specific outputs / state
     welcome_agent_output: Optional[WelcomeAgentOutput] = None
     quiz_generator_agent_output: Optional[QuizGeneratorAgentOutput] = None
-    answer_checker_agent_output: Optional[AnswerCheckerAgentOutput] = None
+ 
 
     # Quiz-specific state
     quiz_questions: Optional[List[QuizQuestion]] = None # Stores the generated quiz
@@ -411,92 +369,8 @@ async def quiz_generator_node(state: AppState) -> Dict:
         })
         return updates
 
-async def answer_checker_node(state: AppState) -> Dict[str, Any]:
-    """Async LangGraph node for the Answer Checker agent."""
-    print("--- Entering Answer Checker Node ---")
-    node_name = "answer_checker_agent"
-    updates: Dict[str, Any] = {"agent_trace": state.agent_trace + [node_name]}
-    updated_messages = state.messages.copy()
 
-    # --- Crucial Check: Do we have a quiz and a question index? ---
-    if not state.quiz_questions or state.current_question_index < 0 or state.current_question_index >= len(state.quiz_questions):
-        print("WARN: Answer Checker Node called without an active question.")
-        # Respond gracefully if no question is active
-        fallback_message = "It seems there isn't an active question right now. Would you like to start a new quiz?"
-        updated_messages.append({"role": "assistant", "content": fallback_message})
-        updates.update({
-            "messages": updated_messages,
-            "current_status": "no_active_question",
-            # Provide default output
-             "answer_checker_agent_output": AnswerCheckerAgentOutput(message_to_user=fallback_message, is_correct=False, user_answer=state.user_response or "", correct_answer="")
-        })
-        return updates
-    # --- End Check ---
 
-    try:
-        # Get context for the current question
-        current_question = state.quiz_questions[state.current_question_index]
-        question_text = current_question.question
-        correct_answer = current_question.correct_answer
-
-        # Run the Answer Checker agent with necessary context
-        answer_checker_result = await run_answer_checker_agent({
-            "user_response": state.user_response, # The user's answer attempt
-            "conversation_id": state.conversation_id,
-            "conversation_history": updated_messages,
-            "question_text": question_text,
-            "correct_answer": correct_answer
-        })
-
-        # Add assistant's feedback message
-        if answer_checker_result.message_to_user:
-            updated_messages.append({"role": "assistant", "content": answer_checker_result.message_to_user})
-
-        # --- State Update after Checking ---
-        # Basic: Update output and status.
-        # Advanced (Needs Graph Looping): Increment current_question_index, check if quiz ends.
-        # For this non-looping graph, we just record the check.
-        # A real quiz would need logic here to decide if we ask the *next* question or end.
-        next_question_index = state.current_question_index + 1 # Hypothetical next index
-        is_quiz_finished = next_question_index >= len(state.quiz_questions)
-
-        updates.update({
-            "answer_checker_agent_output": answer_checker_result,
-            "messages": updated_messages,
-            "current_status": "answer_checked",
-            # "current_question_index": next_question_index, # Uncomment if implementing looping
-            "error_message": None
-        })
-
-        # --- Placeholder for next step logic (if graph looped) ---
-        # if not is_quiz_finished:
-        #     next_q = state.quiz_questions[next_question_index]
-        #     # Add message to ask the next question
-        #     ask_next_msg = f"Next question:\n{next_q.question}\nOptions: {', '.join(next_q.options)}"
-        #     updated_messages.append({"role": "assistant", "content": ask_next_msg})
-        #     updates["messages"] = updated_messages # Update messages again
-        # else:
-        #     # Add quiz finished message
-        #     finish_msg = "You've completed the quiz!"
-        #     updated_messages.append({"role": "assistant", "content": finish_msg})
-        #     updates["messages"] = updated_messages # Update messages again
-        #     updates["current_question_index"] = -1 # Reset index
-        # --- End Placeholder ---
-
-        return updates
-
-    except Exception as e:
-        error_msg = f"Error in answer_checker_node: {e}"
-        print(error_msg)
-        updates["error_message"] = error_msg
-        fallback_message = "An error occurred while checking your answer."
-        updated_messages.append({"role": "assistant", "content": fallback_message})
-        updates.update({
-            "messages": updated_messages,
-            # Provide default output
-            "answer_checker_agent_output": AnswerCheckerAgentOutput(message_to_user=fallback_message, is_correct=False, user_answer=state.user_response or "", correct_answer="Unknown")
-        })
-        return updates
 
 # --- LangGraph Routing Function ---
 
@@ -521,7 +395,7 @@ workflow = StateGraph(AppState)
 # Add nodes
 workflow.add_node("welcome_agent", welcome_node)
 workflow.add_node("quiz_generator_agent", quiz_generator_node)
-workflow.add_node("answer_checker_agent", answer_checker_node)
+
 
 # Define edges
 workflow.add_edge(START, "welcome_agent")
@@ -532,7 +406,6 @@ workflow.add_conditional_edges(
     welcome_node_decision, # Function to determine the next node
     {
         "quiz_generator_agent": "quiz_generator_agent",
-        "answer_checker_agent": "answer_checker_agent",
         "end": END # Explicitly map END state to the graph's END
     }
 )
@@ -580,6 +453,7 @@ async def quiz_generator_endpoint(state: AppState) -> Dict[str, Any]:
         
         # Run the graph with the state
         final_state = await compiled_graph.ainvoke(current_state_dict)
+        print(state.messages)
         
         return {
             "status": "success",
