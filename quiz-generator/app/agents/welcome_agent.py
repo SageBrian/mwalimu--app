@@ -1,156 +1,151 @@
-import logging
-import os
+# --- Import Libraries ---
 import asyncio
-from typing import Optional
+import os
+from typing import Optional, List, Dict, Any, Literal, Annotated
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
 
-# Import necessary Pydantic models
-from app.models.pydantic_models import (
-    SingleHandoff,
-    QuizGenerationHandoffParameters,
-    QuizGenerationAgentInput
-)
-from app.graph.state import AppState
+from langgraph.graph import StateGraph, START, END
+# Using MemorySaver for simple in-memory state between turns in the script
+from langgraph.checkpoint.memory import MemorySaver
+from langsmith import Client
+from langsmith import trace
 
-# --- Load environment variables ---
+# No need for these specific imports if not used in prompts
+# from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+# Instead, we'll format prompts directly for simplicity here
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+
+#Models
+from app.models.pydantic_models import QuizState, WelcomeResponse, QuizQuestion, QuizResponse, HandoffParameters
+
+#Prompts
+from app.prompts.welcome_system_prompt import get_welcome_system_prompt
+
+# Load environment variables
 load_dotenv()
 
-# --- Configure logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Configure LangSmith (Keep as is)
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY", "")
+os.environ["LANGCHAIN_PROJECT"] = "quiz-generator-refined" # Changed project name slightly
 
-# --- Constants ---
-AGENT_NAME = "WelcomeAgent"
-INTENT_GENERATE_QUIZ = "request_quiz_generation"
-INTENT_UNCLEAR = "unclear_or_general_query"
-NEXT_AGENT_QUIZ_GENERATION = "quiz_generation_agent"
+# Initialize LangSmith client (Keep as is)
+langsmith_client = Client()
 
-class WelcomeAgentDependencies(BaseModel):
-    conversation_id: Optional[str] = None
-    input_explanation: str
+# Initialize LLM (Keep as is)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
 
-class WelcomeAgentResult(BaseModel):
-    message_to_user: str = Field(description="Message to display to the user")
-    detected_intent: str = Field(description="Detected intent from user input")
-    handoff: Optional[SingleHandoff] = Field(None, description="Handoff parameters if needed")
-    status: str = Field(default="success", description="Status of the agent's execution")
-    error_details: Optional[str] = None
+#
 
-welcome_agent = Agent(
-    'openai:gpt-4',
-    deps_type=WelcomeAgentDependencies,
-    result_type=WelcomeAgentResult,
-    system_prompt="""
-    You are a helpful AI assistant that welcomes users to a quiz generation system.
-    Analyze the user's input to determine if they want to generate a quiz.
+    # Helper to clear interaction fields for the next turn
+def clear_interaction(self):
+    self.user_input = None
+    self.response_to_user = None
+    self.error_message = None
+    return self
+
+
+# Create structured output models using the LLM instance
+# Ensure the schema passed matches the Pydantic model
+welcome_model = llm.with_structured_output(HandoffParameters)
+
+def handle_handoff_response(response: Dict[str, Any], current_state: QuizState) -> Dict[str, Any]:
+    """Handle different types of handoff responses from the LLM."""
+    if not isinstance(response, dict):
+        return {
+            "response_to_user": "I'm not sure how to help with that. Could you please rephrase?",
+            "message_to_user": "I'm not sure how to help with that. Could you please rephrase?",
+            "topic": None,
+            "current_step": "welcome",
+            "welcome_attempts": current_state.welcome_attempts,
+            "error_message": None,
+            "user_input": None
+        }
     
-    If the user wants to generate a quiz:
-    1. Set detected_intent to "request_quiz_generation"
-    2. Create a friendly message acknowledging their request
-    3. Include handoff parameters for the quiz generation agent
+    agent_name = response.get('agent_name')
+    params = response.get('agent_specific_parameters', {})
     
-    If the user's intent is unclear or unrelated to quiz generation:
-    1. Set detected_intent to "unclear_or_general_query"
-    2. Create a helpful message asking for clarification
-    3. Set handoff to None
+    # Define handoff handlers
+    handlers = {
+        'respond_to_user': lambda: {
+            "response_to_user": params.get('message_to_user', ''),
+            "message_to_user": params.get('message_to_user', ''),
+            "topic": None,
+            "current_step": "welcome",
+            "welcome_attempts": current_state.welcome_attempts,
+            "error_message": None,
+            "user_input": None
+        },
+        'question_generator': lambda: {
+            "topic": params.get('topic'),
+            "current_step": "generate",
+            "welcome_attempts": current_state.welcome_attempts,
+            "error_message": None,
+            "user_input": None,
+            "quiz_parameters": params
+        }
+    }
     
-    Always maintain a friendly and helpful tone in your message_to_user.
-    """
-)
+    # Get the appropriate handler or use default
+    handler = handlers.get(agent_name)
+    if handler:
+        return handler()
+    
+    # Default response if no matching handler
+    return {
+        "response_to_user": "I'm not sure how to help with that. Could you please rephrase?",
+        "message_to_user": "I'm not sure how to help with that. Could you please rephrase?",
+        "topic": None,
+        "current_step": "welcome",
+        "welcome_attempts": current_state.welcome_attempts,
+        "error_message": None,
+        "user_input": None
+    }
 
-async def run_welcome_agent(input_data: dict) -> WelcomeAgentResult:
-    """Run the welcome agent with the given input"""
+async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Welcome the user and extract a topic."""
+    print("=== Welcome Node Start ===")
+    
+    # Convert state dict to QuizState if it's not already
+    current_state = state if isinstance(state, QuizState) else QuizState(**state)
+    print(f"Current State: {current_state}")
+    
+    # Increment welcome attempts
+    current_state.welcome_attempts += 1
+    print(f"Attempts: {current_state.welcome_attempts}")
+    
+    # Get user input from the prompt
+    user_input = current_state.user_input
+    print(f"User Input: {user_input}")
+    
     try:
-        # Convert dict to dependencies model
-        deps = WelcomeAgentDependencies(**input_data)
-        
-        # Run agent with the input explanation as primary input
-        result = await welcome_agent.run(
-            deps.input_explanation,  # Primary input must be a string
-            deps=deps  # Dependencies passed separately
+        # Get the system prompt with user input and conversation history
+        system_prompt = get_welcome_system_prompt(
+            user_input=user_input,
+            conversation_history=current_state.conversation_history
         )
-        return result.data
-    except Exception as e:
-        logger.error(f"Error running welcome agent: {str(e)}", exc_info=True)
-        return WelcomeAgentResult(
-            message_to_user="I apologize, but I encountered an error while processing your request. Please try again.",
-            detected_intent=INTENT_UNCLEAR,
-            status="error",
-            error_details=str(e)
-        )
-
-def welcome_agent_runnable(state: AppState) -> AppState:
-    """Wrapper for langgraph compatibility"""
-    logger.info(f"--- Executing {AGENT_NAME} for conversation_id: {state.get('conversation_id')} ---")
-    updated_state = state.copy()
-    
-    # Initialize state fields if they don't exist
-    current_trace = updated_state.setdefault('agent_trace', [])
-    messages_history = updated_state.setdefault('messages', [])
-    node_history = updated_state.setdefault('node_history', [])
-    
-    input_text = updated_state.get('input_explanation')
-    
-    # Basic input validation
-    if not input_text or not isinstance(input_text, str) or len(input_text.strip()) < 5:
-        logger.warning(f"{AGENT_NAME}: Invalid or missing input explanation.")
-        error_result = WelcomeAgentResult(
-            message_to_user="I need a bit more information to help you. Could you please provide more details?",
-            detected_intent=INTENT_UNCLEAR,
-            status="error",
-            error_details="Input explanation is missing or too short."
-        )
-        updated_state['current_status'] = "error"
-        updated_state['error_message'] = error_result.error_details
-        updated_state['last_agent_output'] = error_result.model_dump()
-        node_history.append(error_result.model_dump())
-        return updated_state
-    
-    try:
-        # Run the welcome agent
-        result = asyncio.run(run_welcome_agent(
-            input_data={
-                "conversation_id": state.get('conversation_id', ''),
-                "input_explanation": input_text
-            }
-        ))
         
-        # Update message history
-        if not messages_history or messages_history[-1].get('content') != input_text:
-            messages_history.append({"role": "user", "content": input_text})
-        if result.message_to_user:
-            messages_history.append({"role": "assistant", "content": result.message_to_user})
+        # Send message to LLM
+        print("Sending messages to LLM...")
+        response = await welcome_model.ainvoke(user_input)
+        print(f"Raw LLM Response: {response}")
         
-        # Update state
-        updated_state['current_status'] = "processed_by_welcome"
-        updated_state['error_message'] = None
-        updated_state['last_agent_output'] = result.model_dump()
-        node_history.append(result.model_dump())
-        current_trace.append(f"{AGENT_NAME}: Processed successfully")
+        # Handle the response using the handler function
+        return_state = handle_handoff_response(response, current_state)
+        print(f"Return State: {return_state}")
+        return return_state
         
     except Exception as e:
-        logger.error(f"{AGENT_NAME} execution failed: {str(e)}", exc_info=True)
-        error_result = WelcomeAgentResult(
-            message_to_user="I apologize, but something went wrong. Please try again.",
-            detected_intent=INTENT_UNCLEAR,
-            status="error",
-            error_details=str(e)
-        )
-        updated_state['current_status'] = "error"
-        updated_state['error_message'] = str(e)
-        updated_state['last_agent_output'] = error_result.model_dump()
-        node_history.append(error_result.model_dump())
-        current_trace.append(f"{AGENT_NAME}: Failed execution")
-    
-    # Ensure all lists are updated in state
-    updated_state['messages'] = messages_history
-    updated_state['node_history'] = node_history
-    updated_state['agent_trace'] = current_trace
-    
-    logger.info(f"--- {AGENT_NAME} Execution Complete ---")
-    return updated_state
+        error_msg = f"Error in welcome node: {str(e)}"
+        print(f"Debug - {error_msg}")
+        return {
+            "error_message": error_msg,
+            "current_step": "error",
+            "message_to_user": "I encountered an error. Could you please try again?",
+            "user_input": None
+        }
 
-# Make it available for langgraph
-#welcome_node = define_node("welcome", welcome_agent_runnable)
+

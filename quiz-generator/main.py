@@ -3,6 +3,7 @@
 import logging
 import os
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -11,11 +12,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import JSONResponse
 from langgraph.graph.state import StateGraph
+from langgraph.checkpoint.memory import MemorySaver
 
 # Project specific imports - adjust paths to import from app directory
-from app.graph.builder import build_graph
-from app.graph.state import AppState
-from app.models.pydantic_models import QuizGenerationRequest, QuizGenerationResponse
+from app.graph.quiz_gen_graph import build_graph
+from app.models.pydantic_models import (
+    QuizState,
+    QuizGenerationRequest,
+    QuizGenerationResponse
+)
 
 # --- Configuration Loading ---
 load_dotenv()  # Load environment variables from .env file
@@ -44,13 +49,16 @@ async def lifespan(app: FastAPI):
     compiled_graph = None
     logger.info("Application startup: Initializing resources...")
 
-    # Build and Compile Graph
+    # Use in-memory checkpointing for this simple script
+    memory_saver = MemorySaver()
+
+    # Build and compile the graph
     try:
         logger.info("Building LangGraph definition...")
-        graph_definition = build_graph()
+        workflow = build_graph()
         logger.info("Compiling LangGraph...")
-        compiled_graph = graph_definition.compile()
-        logger.info("LangGraph compiled successfully.")
+        compiled_graph = workflow.compile(checkpointer=memory_saver)
+        logger.info("LangGraph compiled successfully with MemorySaver.")
     except Exception as e:
         logger.exception("FATAL: Failed to build or compile LangGraph.")
         raise RuntimeError("Failed to build or compile graph") from e
@@ -70,13 +78,10 @@ app = FastAPI(
 
 @app.post(
     "/invoke",
-    response_model=QuizGenerationResponse,
     summary="Invoke the Quiz Generation Agent Flow",
     tags=["Quiz Generation"]
 )
-async def invoke_agent_flow(
-    request: QuizGenerationRequest = Body(...)
-):
+async def invoke_agent_flow(request: QuizGenerationRequest = Body(...)):
     """
     Receives user input (text explanation) and an optional conversation ID.
     Invokes the LangGraph flow without persistent memory.
@@ -91,8 +96,8 @@ async def invoke_agent_flow(
     conversation_id = request.conversation_id or f"session_{uuid.uuid4()}"
     logger.info(f"Processing request for conversation_id: {conversation_id}")
 
-    input_state: AppState = {
-        "input_explanation": request.explanation,
+    input_state: QuizState = {
+        "user_input": request.explanation,
         "conversation_id": conversation_id,
     }
 
@@ -129,11 +134,44 @@ async def invoke_agent_flow(
 async def read_root():
     return {"message": "AI Quiz Generator API is running."}
 
-if __name__ == "__main__":
-    logger.info("Starting Uvicorn server for local development...")
-    uvicorn.run(
-        "main:app",  # Use main:app since we're running from the root directory
-        host="0.0.0.0",
-        port=8000,
-        reload=True
+async def run_quiz_generator():
+    """Run the quiz generator application."""
+    # Initialize with welcome message
+    initial_state = QuizState(
+        user_input=None,
+        topic=None,
+        questions=[],
+        error_message=None,
+        current_step="welcome",
+        response_to_user=None,
+        welcome_attempts=0,
+        message_to_user="Welcome to the Quiz Generator! What topic would you like a quiz on? (Type 'exit' to quit)",
+        conversation_history=[]
     )
+    
+    # Build and compile the graph
+    workflow = build_graph()
+    app = workflow.compile()
+    
+    # Run the graph
+    print("\n--- Invoking Graph ---\n")
+    result = await app.ainvoke(initial_state.model_dump())
+    print("\n--- Graph Execution Finished ---\n")
+
+def main():
+    """Main entry point for the application."""
+    try:
+        # Initialize the graph using the existing FastAPI app
+        async def init_graph():
+            async with lifespan(app):
+                await run_quiz_generator()
+        
+        # Run the initialization and quiz generator
+        asyncio.run(init_graph())
+    except KeyboardInterrupt:
+        print("\nAssistant: Exiting Quiz Generator.")
+    except Exception as e:
+        print(f"Fatal error: {e}")
+
+if __name__ == "__main__":
+    main()
