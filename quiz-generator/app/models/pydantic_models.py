@@ -50,6 +50,14 @@ class HandoffParameters(BaseModel):
     message_to_agent: str = Field(description="Message  to the agent to help it understand the request")
     agent_specific_parameters: Union[RespondToUserParameters, QuizGenParameters] = Field(description="Agent specific parameters")
 
+class Handoff(BaseModel):
+    """Main handoff model with a list of agents"""
+    """
+    This model is used to handoff to agents.
+    It contains a list of agents to handoff to.
+    Each agent has a name, a message to the agent, and agent specific parameters.
+    """
+    handoff_agents: List[HandoffParameters] = Field(description="List of agents to handoff to")
 
 # --- Refined LangGraph State ---
 class QuizState(BaseModel):
@@ -63,4 +71,5 @@ class QuizState(BaseModel):
     welcome_attempts: int = 0
     message_to_user: Optional[str] = None
     conversation_history: List[Dict[str, str]] = []
-    topic: Optional[str] = None
+    node_history: List[Dict[str, Any]] = []
+    handoff_agents_params: List[Dict[str, Any]] = []

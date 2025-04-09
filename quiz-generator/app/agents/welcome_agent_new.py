@@ -11,6 +11,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from langsmith import Client
 from langsmith import trace
 
+#logging
+import logging
+logger = logging.getLogger(__name__)
+
 # No need for these specific imports if not used in prompts
 # from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 # Instead, we'll format prompts directly for simplicity here
@@ -68,36 +72,17 @@ def handle_handoff_response(response: Dict[str, Any], current_state: QuizState) 
     # Check if it's a handoff response
     if 'handoff_agents' in response:
         # Iterate over each agent in the handoff_agents list
+        handoff_agents_params = []
         for agent in response['handoff_agents']:
-            agent_name = agent.agent_name
-            params = agent.agent_specific_parameters
-            
-            # Define handoff handlers
-            handlers = {
-                'respond_to_user': lambda: {
-                    "response_to_user": params.message_to_user,
-                    "message_to_user": params.message_to_user,
-                    "topic": None,
-                    "current_step": "welcome",
-                    "welcome_attempts": current_state.welcome_attempts,
-                    "error_message": None,
-                    "user_input": None
-                },
-                'question_generator': lambda: {
-                    "topic": params.topic,
-                    "current_step": "generate",
-                    "welcome_attempts": current_state.welcome_attempts,
-                    "error_message": None,
-                    "user_input": None,
-                    "quiz_parameters": params
-                }
-            }
-            
-            # Get the appropriate handler or use default
-            handler = handlers.get(agent_name)
-            if handler:
-                # Execute the handler and return the state
-                return handler()
+            handoff_agents_params.append(HandoffParameters(**agent))
+        
+        return {
+            "handoff_agents": handoff_agents_params,
+            "current_step": "welcome",
+            "welcome_attempts": current_state.welcome_attempts,
+            "error_message": None,
+            "user_input": None
+        }
     
     # Default response if no matching handler
     return {
@@ -132,25 +117,63 @@ async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
             user_input=user_input,
             conversation_history=current_state.conversation_history
         )
-        
         # Send message to LLM
         print("Sending messages to LLM...")
         response = await welcome_model.ainvoke(user_input)
         print(f"Raw LLM Response: {response}")
+
+        # Update node_history with LLM response
+        current_state.node_history.append({
+            "node_name": "welcome",
+            "response": response
+        })
         
-        # Handle the response using the handler function
-        return_state = handle_handoff_response(response, current_state)
-        print(f"Return State: {return_state}")
-        return return_state
+        # Log state after welcome node (moved before return)
+        logger.info(f"State after welcome node: {current_state}")
+        #print(f"State after welcome node: {current_state}")
+        print("=== Welcome Node End ===")
+        
+        # Process handoff agents - extract from the response
+        handoff_agents_params = []
+        if hasattr(response, 'handoff_agents') and response.handoff_agents:
+            handoff_agents_params = response.handoff_agents
+            print(f"Extracted handoff agents: {handoff_agents_params}")
+        
+        return {
+            "node_history": current_state.node_history,
+            "handoff_agents": handoff_agents_params,
+            "current_step": "welcome",
+            "welcome_attempts": current_state.welcome_attempts,
+            "error_message": None,
+            "user_input": None
+        }
         
     except Exception as e:
         error_msg = f"Error in welcome node: {str(e)}"
         print(f"Debug - {error_msg}")
+        # Update node_history with error message.
+        
+        error_response = """[HandoffParameters(agent_name='respond_to_user', message_to_agent='Error.', " \
+            "agent_specific_parameters=RespondToUserParameters(message_to_user='Hello! We experienced an error', " \
+            "agent_after_response=None)]"""
+        current_state.node_history.append({
+            "node_name": "welcome",
+            "response": error_response
+        })
+        
+        logger.info(f"State after error in welcome node: {current_state}")
+        #print(f"State after error in welcome node: {current_state}")
+        print("=== Welcome Node End ===")
+        
         return {
-            "error_message": error_msg,
+            "node_history": current_state.node_history,
             "current_step": "error",
-            "message_to_user": "I encountered an error. Could you please try again?",
+            "error_message": error_msg,
             "user_input": None
         }
+    
+    
+    
+            
 
 

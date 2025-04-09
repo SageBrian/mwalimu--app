@@ -1,13 +1,15 @@
 # Core
 fastapi
 uvicorn[standard]
-pydantic
-python-dotenv
-langchain>=0.1.0
+pydantic==2.6.4
+python-dotenv==1.0.1
+
+
+langchain-core==0.1.32
+langchain-openai==0.0.8
 langgraph>=0.0.30 # Ensure a recent version for checkpointer features
 
 # LLM (Example: OpenAI)
-langchain-openai>=0.1.0
 openai>=1.0
 
 # Database Checkpointing (Async PostgreSQL)

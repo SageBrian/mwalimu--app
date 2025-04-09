@@ -12,6 +12,7 @@ from app.models.pydantic_models import QuizState, WelcomeResponse, QuizResponse
 from app.agents.welcome_agent import welcome_node
 from app.agents.quiz_gen_agent import generate_quiz_node
 from app.agents.respond_to_user import respond_to_user_node
+from app.agents.welcome_agent_new import welcome_node
 
 def should_respond_to_user(state: Dict[str, Any]) -> bool:
     """Determine if we should continue to the respond node."""
@@ -90,32 +91,11 @@ def build_graph() -> StateGraph:
     # Add nodes
     workflow.add_node("respond", respond_to_user_node)
     workflow.add_node("welcome", welcome_node)
-    workflow.add_node("generate", generate_quiz_node)
-
-    # Set entry point
-    workflow.set_entry_point("respond")
-
-    # Add edges
+    
+    #add edges
+    workflow.add_edge(START, "respond")
     workflow.add_edge("respond", "welcome")
-
-    # Add conditional edges
-    workflow.add_conditional_edges(
-        "welcome",
-        should_respond_to_user,
-        {
-            True: "respond",
-            False: "generate"
-        }
-    )
-
-    workflow.add_conditional_edges(
-        "respond",
-        continue_after_respond,
-        {
-            "welcome": "welcome",
-            "generate": "generate",
-            "error": END
-        }
-    )
+    workflow.add_edge("welcome", END)
+  
     
     return workflow

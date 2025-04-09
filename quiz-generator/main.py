@@ -129,6 +129,7 @@ async def invoke_agent_flow(request: QuizGenerationRequest = Body(...)):
 
     logger.info(f"Sending response for conversation_id: {conversation_id}, Status: {response_status}")
     return response_data
+   
 
 @app.get("/", tags=["Health Check"])
 async def read_root():
@@ -146,7 +147,8 @@ async def run_quiz_generator():
         response_to_user=None,
         welcome_attempts=0,
         message_to_user="Welcome to the Quiz Generator! What topic would you like a quiz on? (Type 'exit' to quit)",
-        conversation_history=[]
+        conversation_history=[],
+        node_history=[]
     )
     
     # Build and compile the graph
