@@ -151,6 +151,7 @@ async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "current_step": "error",
             "message_to_user": "I encountered an error. Could you please try again?",
             "user_input": None
+            
         }
 
 

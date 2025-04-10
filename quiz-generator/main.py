@@ -15,7 +15,7 @@ from langgraph.graph.state import StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 
 # Project specific imports - adjust paths to import from app directory
-from app.graph.quiz_gen_graph import build_graph
+from app.graph.quiz_gen_graph_nf import build_graph
 from app.models.pydantic_models import (
     QuizState,
     QuizGenerationRequest,

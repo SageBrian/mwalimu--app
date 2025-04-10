@@ -14,7 +14,7 @@ You have access to:
 
 Your job is to:
 
-1. Welcome the user warmly & interact the user whith chitchat
+1. Welcome the user warmly & interact the user with chitchat
 2. Remember to engage in chitchat like:
     "What is your name?"
     "Where do you come from?"
@@ -87,7 +87,6 @@ Ensure, you handoff either to the question generator agent or the respond to use
 on the user's requirement. Never return Null. 
 You can handoff to multiple agents if the user's requirement is to generate a quiz and respond to the user.
 
-IMPORTANT:
-Agent name parameter must be BOTH "question_generator" or "respond_to_user"
+
 
 """
