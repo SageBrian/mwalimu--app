@@ -1,179 +1,133 @@
-# main.py (Place this in the quiz-generator directory)
+# main.py - Simplified for human-in-the-loop conversation handling
 
-import logging
-import os
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
 import uuid
-import asyncio
-from contextlib import asynccontextmanager
-from typing import Optional
-
-import uvicorn
+import logging
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import JSONResponse
-from langgraph.graph.state import StateGraph
-from langgraph.checkpoint.memory import MemorySaver
 
-# Project specific imports - adjust paths to import from app directory
-from app.graph.quiz_gen_graph_nf import build_graph
-from app.models.pydantic_models import (
-    QuizState,
-    QuizGenerationRequest,
-    QuizGenerationResponse
-)
-
-# --- Configuration Loading ---
-load_dotenv()  # Load environment variables from .env file
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Needed by agents potentially
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Warning if OpenAI key is missing, as agents might fail later
-if not OPENAI_API_KEY or not GEMINI_API_KEY:
-    print("Warning: OPENAI_API_KEY or GEMINI_API_KEY environment variable not set. LLM calls may fail.")
-
-# --- Logging Setup ---
+# Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Global Variables ---
-compiled_graph: Optional[StateGraph] = None
+# Load environment variables
+load_dotenv()
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Handles application startup and shutdown events.
-    Initializes and compiles the graph.
-    """
-    global compiled_graph
-    compiled_graph = None
-    logger.info("Application startup: Initializing resources...")
-
-    # Use in-memory checkpointing for this simple script
-    memory_saver = MemorySaver()
-
-    # Build and compile the graph
-    try:
-        logger.info("Building LangGraph definition...")
-        workflow = build_graph()
-        logger.info("Compiling LangGraph...")
-        compiled_graph = workflow.compile(checkpointer=memory_saver)
-        logger.info("LangGraph compiled successfully with MemorySaver.")
-    except Exception as e:
-        logger.exception("FATAL: Failed to build or compile LangGraph.")
-        raise RuntimeError("Failed to build or compile graph") from e
-
-    yield
-
-    logger.info("Application shutdown: Cleaning up resources...")
-    logger.info("Cleanup finished.")
-
-# --- FastAPI Application Instance ---
-app = FastAPI(
-    title="AI Quiz Generator API",
-    description="API endpoint to interact with the LangGraph-based Quiz Generator",
-    version="0.1.0",
-    lifespan=lifespan
+# Import Pydantic Models
+from app.models.pydantic_models import (
+    MwalimuBotState,
+    ChatRequest
 )
 
-@app.post(
-    "/invoke",
-    summary="Invoke the Quiz Generation Agent Flow",
-    tags=["Quiz Generation"]
-)
-async def invoke_agent_flow(request: QuizGenerationRequest = Body(...)):
-    """
-    Receives user input (text explanation) and an optional conversation ID.
-    Invokes the LangGraph flow without persistent memory.
-    Returns the latest status, message for the user, and conversation ID.
-    """
-    global compiled_graph
+# Import DB Functions
+from app.shared_services.save_load_conversation import save_conversation, load_conversation
 
-    if compiled_graph is None:
-        logger.error("Graph not compiled during startup. Cannot process request.")
-        raise HTTPException(status_code=500, detail="Internal Server Error: Graph not ready.")
+# Import Graph Builder
+from app.graph.graph import build_graph
 
-    conversation_id = request.conversation_id or f"session_{uuid.uuid4()}"
-    logger.info(f"Processing request for conversation_id: {conversation_id}")
+# Build and compile the graph once when the application starts
+workflow = build_graph()
+graph = workflow.compile()
+logger.info("LangGraph built and compiled successfully.")
 
-    input_state: QuizState = {
-        "user_input": request.explanation,
-        "conversation_id": conversation_id,
-    }
+# FastAPI App Instance
+app = FastAPI()
 
-    try:
-        logger.info(f"Invoking graph for conversation_id: {conversation_id}...")
-        final_state = await compiled_graph.ainvoke(input=input_state)
-        logger.info(f"Graph invocation complete for conversation_id: {conversation_id}")
-
-    except Exception as e:
-        logger.exception(f"Error during graph invocation for conversation_id: {conversation_id}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error during graph execution: {str(e)}")
-
-    if not final_state or not isinstance(final_state, dict):
-        logger.error(f"Graph invocation for {conversation_id} did not return a valid final state dictionary.")
-        raise HTTPException(status_code=500, detail="Internal Server Error: Invalid final state.")
-
-    last_agent_output = final_state.get('last_agent_output', {})
-    message_to_user = last_agent_output.get('message_to_user', "Processing complete.")
-    error_message = final_state.get('error_message')
-
-    response_status = "error" if error_message or last_agent_output.get('status') == 'error' else "completed"
-
-    response_data = QuizGenerationResponse(
-        conversation_id=conversation_id,
-        status=response_status,
-        message=error_message or message_to_user,
-        questions=[]
-    )
-
-    logger.info(f"Sending response for conversation_id: {conversation_id}, Status: {response_status}")
-    return response_data
-   
-
-@app.get("/", tags=["Health Check"])
+@app.get("/")
 async def read_root():
-    return {"message": "AI Quiz Generator API is running."}
+    return {"message": "MwalimuBot is running!"}
 
-async def run_quiz_generator():
-    """Run the quiz generator application."""
-    # Initialize with welcome message
-    initial_state = QuizState(
-        user_input=None,
-        topic=None,
-        questions=[],
-        error_message=None,
-        current_step="welcome",
-        response_to_user=None,
-        welcome_attempts=0,
-        message_to_user="Welcome to the Quiz Generator! What topic would you like a quiz on? (Type 'exit' to quit)",
-        conversation_history=[],
-        node_history=[]
-    )
-    
-    # Build and compile the graph
-    workflow = build_graph()
-    app = workflow.compile()
-    
-    # Run the graph
-    print("\n--- Invoking Graph ---\n")
-    result = await app.ainvoke(initial_state.model_dump())
-    print("\n--- Graph Execution Finished ---\n")
+@app.post("/chat/")
+async def chat_endpoint(request: ChatRequest):
+    """
+    Handles chat interactions with human-in-the-loop state management.
+    """
+    user_id = request.user_id
+    user_message = request.message
+    loaded_state = None
 
-def main():
-    """Main entry point for the application."""
+    print(f"User ID: {user_id}")
+    print(f"User Message: {user_message}")
+
     try:
-        # Initialize the graph using the existing FastAPI app
-        async def init_graph():
-            async with lifespan(app):
-                await run_quiz_generator()
+        # 1. Handle existing conversation or create new one
+        phone_number = request.phone_number 
         
-        # Run the initialization and quiz generator
-        asyncio.run(init_graph())
-    except KeyboardInterrupt:
-        print("\nAssistant: Exiting Quiz Generator.")
+        # Try to load existing conversation if ID was provided
+        if phone_number:
+            loaded_state_data = load_conversation(phone_number)
+            if loaded_state_data:
+                # Convert loaded data to QuizState and update with new message
+                loaded_state = MwalimuBotState.model_validate(loaded_state_data)
+                # Reset temporary state fields
+                loaded_state.message_to_student = None
+                loaded_state.error_message = None
+                loaded_state.handoff_agents_params = []
+                loaded_state.handoff_agents = []
+                # Add new message
+                loaded_state.user_input = user_message
+                loaded_state.conversation_history.append({
+                    "role": "human", 
+                    "content": user_message
+                })
+    
+                logger.info(f"Loaded and updated existing state for conversation {phone_number}")
+
+        # Create new state if none exists or wasn't found
+        if not loaded_state:
+            # Initialize new state with all required fields
+            student_id = str(uuid.uuid4())
+            loaded_state = MwalimuBotState(
+                user_id=user_id,
+                phone_number=phone_number,
+                user_input=user_message,
+                conversation_history=[{"role": "human", "content": user_message}],
+                current_subject=None,
+                current_grade = 2,
+                rag_context = None,
+                node_history=[],
+                ready_for_tutoring= False,
+                ready_for_quiz = False,
+                first_node="routing_agent",
+                current_step=None,
+                response_to_user_attempts=0
+            )
+            logger.info(f"Created new state for conversation {phone_number}")
+
+        # 3. Run the graph with the state
+        final_state = await graph.ainvoke(loaded_state.model_dump())
+        final_state = MwalimuBotState.model_validate(final_state)
+        logger.info(f"Graph execution completed for {phone_number}")
+
+        # 4. Save the final state
+        state_to_save = final_state.model_dump()
+        state_to_save["phone_number"] = phone_number  # Ensure phone_number is in the state
+        save_conversation(state_to_save)
+        logger.info(f"Saved state for conversation {phone_number}")
+
+        # 5. Prepare response
+        response_message = None
+        if final_state.message_to_student:
+            response_message = final_state.message_to_student
+        elif final_state.response_to_user:
+            response_message = final_state.response_to_user
+        else:
+            response_message = {
+                "message_to_student": "Processing complete.",
+               
+            }
+
+        # 6. Return response
+        return {
+            "response": response_message,
+            "phone_number": phone_number
+        }
+
     except Exception as e:
-        print(f"Fatal error: {e}")
+        logger.error(f"Error processing conversation {phone_number}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error processing conversation: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

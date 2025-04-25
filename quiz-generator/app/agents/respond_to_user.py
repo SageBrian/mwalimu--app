@@ -1,40 +1,36 @@
 # quiz-generator/app/agents/respond_to_user.py
+# Agent to stream the response to user and potentially the artifact (quiz) to the user
 
 from typing import Dict, Any
 from langchain_core.messages import HumanMessage
-from app.models.pydantic_models import QuizState
+from app.models.pydantic_models import MwalimuBotState
+
+import logging
+logger = logging.getLogger(__name__)
 
 async def respond_to_user_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Node for handling user communication and updating conversation history."""
-    # Convert state dict to QuizState if it's not already
-    print("===== Entering Respond to User Node ======")
+    logger.info("===== Entering Respond to User Node ======")
   
-    current_state = state if isinstance(state, QuizState) else QuizState(**state)
+    current_state = state if isinstance(state, MwalimuBotState) else MwalimuBotState(**state)
     
-    # Display message to user if there is one
-    if current_state.message_to_user:
-        print(f"\nAssistant: {current_state.message_to_user}")
+    # Process message to user if there is one
+    if current_state.message_to_student:
+        logger.info(f"Processing message to user: {current_state.message_to_student}")
         # Add assistant's message to conversation history
         current_state.conversation_history.append({
             "role": "assistant",
-            "content": current_state.message_to_user
+            "content": current_state.message_to_student
         })
-        # Clear the message after displaying
-        current_state.message_to_user = None
     
-    # Get user input
-    user_input = input("\nYou: ").strip()
+    return_state = {
+        "conversation_history": current_state.conversation_history,
+        "response_to_user_attempts": current_state.response_to_user_attempts + 1,
+        "current_step": "respond_to_user",
+        # Keep the message_to_user in the state so it can be sent in the API response
+        "message_to_student": current_state.message_to_student
+    }
     
-    # Update state with user input
-    current_state.user_input = user_input
+    logger.info("===== Exiting Respond to User Node ======")
     
-    # Update conversation history with user input
-    if user_input:
-        current_state.conversation_history.append({
-            "role": "user",
-            "content": user_input
-        })
-    current_state.current_step = "welcome"
-    print("===== Exiting Respond to User Node ======")
-    
-    return current_state.dict()
+    return return_state

@@ -2,63 +2,67 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Union, Literal, Dict, Any, Annotated
 from datetime import datetime
 
-# --- Data Structures for Quiz ---
-class QuizQuestion(BaseModel):
-    question: str = Field(description="The quiz question")
-    # Ensuring options have clear labels for display/answering
-    options: List[str] = Field(description="List of possible answers, prefixed like 'A. Answer Text'")
-    correct_answer: str = Field(description="The correct answer (matching one of the options exactly)")
-    explanation: str = Field(description="Explanation for the answer")
+# Data Structures for MwalimuBot
 
-# --- API Request/Response Models ---
-class QuizGenerationRequest(BaseModel):
-    """Request model for quiz generation endpoint."""
-    explanation: str = Field(description="User's explanation or topic for quiz generation")
-    conversation_id: Optional[str] = Field(None, description="Optional conversation ID for tracking")
+# Langgraph main state
+class MwalimuBotState(BaseModel):
+    user_input: str
+    user_id:str
+    phone_number:str
+    first_node:str
+    conversation_history: List[Dict[str, Any]] 
+    node_history: List[Dict[str, Any]]
+    message_to_student: Optional[str] = None
+    current_subject: Optional[str] = None
+    current_grade: int = Field(default=0, ge=0, le=12)
+    rag_context: Optional[str] = None
+    ready_for_tutoring: bool = False
+    ready_for_quiz: bool = False
+    handoff_agents: List[str] = Field(default=[])
+    handoff_agents_params: List[Dict[str, Any]] = Field(default=[])
+    router_attempts: int = 0
+    tutor_attempts: int = 0
+    error_message: Optional[str] = None
+    current_step: Optional[str] = None
+    response_to_user_attempts: int = 0
 
-class QuizGenerationResponse(BaseModel):
-    """Response model for quiz generation endpoint."""
-    conversation_id: str = Field(description="Conversation ID for tracking")
-    status: str = Field(description="Status of the quiz generation (completed/error)")
-    message: str = Field(description="Message to display to the user")
-    questions: List[QuizQuestion] = Field(default_factory=list, description="Generated quiz questions")
+class Student(BaseModel):
+    id: str
+    name: Optional[str] = None
+    subjects: Optional[List[str]] = None
+    current_subject: Optional[str] = None
+    current_grade: int = Field(default=0, ge=0, le=12)
+    router_attempts:int = 0
 
-# --- Simplified LLM Response Schemas (Removed redundant current_step) ---
-class WelcomeResponse(BaseModel):
-    """Response schema for welcome logic."""
-    response_to_user: str = Field(description="Response to show to the user")
-    topic: Optional[str] = Field(None, description="Extracted topic if found")
+class Question(BaseModel):
+    id: str
+    question: str
+    options: List[str]
+    answer: str
+    
+class Quiz(BaseModel):
+    id: str
+    subject: str
+    grade: int
+    questions: List[Question]
 
-#--- Agent specific parameters ---
+
+class TutorParameters(BaseModel):
+    subject: str
+    grade: int
+
+    
+
 class RespondToUserParameters(BaseModel):
-    message_to_user: str = Field(..., description="Message to display to the user")
-    agent_after_response: Optional[str] = Field(None, description="Agent to handoff to after response from user, default is the agent handing off")
-
-class QuizGenParameters(BaseModel):
-    topic: str = Field(description="User's explanation or topic for quiz generation")
-    difficulty: Optional[str] = Field( description="The difficulty level of the quiz, default is medium")
-    num_questions: Optional[int] = Field( description="The number of questions in the quiz, default is 5")
-    tone: Optional[str] = Field( description="The tone of the quiz, default is neutral")
-
-class QuizReviewParameters(BaseModel):
-    """Parameters for quiz review."""
-    quiz_questions: List[QuizQuestion] = Field(description="List of quiz questions")
-
-    #--- Handoff to agents ---
+    message_to_student: str
+    agent_after_response: str = "routing_agent"
 
 class HandoffParameters(BaseModel):
     """Parameters for handoff to agents."""
-    agent_name: Literal["question_generator", "respond_to_user"] = Field(description="Name of the agent to handoff to, must be either 'question_generator' or 'respond_to_user'")
+    agent_name: Literal["respond_to_user", "tutor_agent"] = Field(description="Name of the agent to handoff to, must be another agent")
     message_to_agent: str = Field(description="Message  to the agent to help it understand the request")
-    agent_specific_parameters: Union[RespondToUserParameters, QuizGenParameters] = Field(description="Agent specific parameters")
-
-class GenerationHandoff(BaseModel):
-    """Parameters for generation handoff."""
-    agent_name: Literal["question_generator", "respond_to_user"] = Field(description="Name of the agent to handoff to, must be either 'question_generator' or 'respond_to_user'")
-    message_to_agent: str = Field(description="Message  to the agent to help it understand the request")
-    agent_specific_parameters: Union[RespondToUserParameters, QuizReviewParameters] = Field(description="Agent specific parameters")
-
-
+    agent_specific_parameters: Union[TutorParameters, RespondToUserParameters]= Field("agent specific parameters i.e TutorParameters for tutor_agent or RespondToUserParameters for respond_to_user")
+    
 
 
 class Handoff(BaseModel):
@@ -69,28 +73,14 @@ class Handoff(BaseModel):
     Each agent has a name, a message to the agent, and agent specific parameters.
     """
     handoff_agents: List[HandoffParameters] = Field(description="List of agents to handoff to")
+    
+class ChatRequest(BaseModel):
+    user_id: Optional[str] = Field(None, description="User ID")
+    phone_number: str = Field(description="Phone Number")
+    message: str = Field(description="Message")
 
-class ClosureParameters(BaseModel):
-    """Parameters for closure of the graph."""
-    closure_reason: str = Field(description="Reason for closure/end of the graph")
-    closure_actions: Optional[List[str]] = Field(description="Any actions to perform after the graph is closed")
+class ChatResponse(BaseModel):
+    phone_number: str = Field(description="Phone Number")
+    message: str = Field(description="Message")
+    error: Optional[str] = Field(None, description="Error")
 
-
-
-# --- Refined LangGraph State ---
-class QuizState(BaseModel):
-    """Represents the state of the quiz generation process."""
-    user_input: Optional[str] = None
-    quiz_parameters: Optional[Dict[str, Any]] = None
-    questions: List[QuizQuestion] = []
-    error_message: Annotated[Optional[str], Field(default=None)] = None
-    current_step: Annotated[str, Field(default="welcome")]
-    response_to_user: Optional[str] = None
-    welcome_attempts: int = 0
-    message_to_user: Optional[str] = None
-    conversation_history: List[Dict[str, str]] = []
-    node_history: List[Dict[str, Any]] = []
-    handoff_agents_params: List[Dict[str, Any]] = []
-    closure_params: List[Dict[str, Any]] = []
-    handoff_agents: List[str] = []
-    generation_attempts: int = 0

@@ -1,4 +1,5 @@
-#-- Welcome Agent for Quiz Generator, without Frameworks
+
+# mwalimubot/backedn/app/agents/tutor_agent.py
 
 # --- Import Libraries ---
 import asyncio
@@ -12,9 +13,9 @@ from pydantic import BaseModel, Field
 from app.shared_services.llm import call_llm_api
 
 #Models
-from app.models.pydantic_models import QuizState, WelcomeResponse, QuizQuestion, HandoffParameters, Handoff, RespondToUserParameters, QuizGenParameters
+from app.models.pydantic_models import MwalimuBotState, Handoff, TutorParameters, RespondToUserParameters
 #Prompts
-from app.prompts.welcome_system_prompt import get_welcome_system_prompt
+from app.prompts.tutor_agent_prompt import get_tutor_agent_prompt
 
 # Load environment variables
 load_dotenv()
@@ -23,23 +24,23 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# Add the welcome_node function for direct import
-async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Welcome the user and extract a topic."""
+# Add the tutor_node function for direct import
+async def tutor_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Receives user_message and routes to the best Next agent."""
     # --- Print State Entering Node ---
-    print("\n=== State Entering Welcome Node ===")
+    print("\n=== State Entering Router Node ===")
     print(state)
     print("=================================\n")
     # --- End Print ---
 
-    print("=== Welcome Node Start Execution ===")
+    print("=== Tutor Node Start Execution ===")
 
     # Convert state dict to QuizState if it's not already
-    current_state = state if isinstance(state, QuizState) else QuizState(**state)
+    current_state = state if isinstance(state, MwalimuBotState) else MwalimuBotState(**state)
 
-    # Increment welcome attempts
-    current_state.welcome_attempts += 1
-    print(f"Attempts: {current_state.welcome_attempts}")
+    # Increment tutor attempts
+    current_state.tutor_attempts += 1
+    print(f"Attempts: {current_state.tutor_attempts}")
 
     # Get user input from the prompt
     user_input = current_state.user_input
@@ -47,7 +48,7 @@ async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         # Get the system prompt with user input and conversation history
-        system_prompt = get_welcome_system_prompt(
+        system_prompt = get_tutor_agent_prompt(
             user_input=user_input,
             conversation_history=current_state.conversation_history
         )
@@ -60,7 +61,7 @@ async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         response = call_llm_api(
             messages=messages,
-            model="gpt-4o-mini-2024-07-18",
+            #model="gpt-4o-mini-2024-07-18",
             temperature=0.7,
             response_format=Handoff
         )
@@ -74,17 +75,19 @@ async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
         # Update node_history with the parsed LLM response object
         current_state.node_history.append({
-            "node_name": "welcome",
+            "node_name": "tutor",
             "response": response
         })
 
-        # Log state after welcome node (before returning changes)
+        # Log state after tutor node (before returning changes)
         logger.info(f"State before processing response: {current_state}")
 
-        # Process handoff agents - extract from the response
+        # # Process handoff agents - extract from the response
         extracted_handoff_agents = []
         extracted_quiz_params = None
-        message_to_user = None
+        message_to_student = None
+
+
 
         if response.handoff_agents:
             extracted_handoff_agents = response.handoff_agents
@@ -92,37 +95,36 @@ async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
             # Find quiz parameters if question_generator agent exists
             for agent in extracted_handoff_agents:
-                if agent.agent_name == 'question_generator':
-                    if isinstance(agent.agent_specific_parameters, QuizGenParameters):
-                        extracted_quiz_params = agent.agent_specific_parameters
-                        print(f"Extracted quiz parameters: {extracted_quiz_params}")
+                if agent.agent_name == 'tutor_agent':
+                    if isinstance(agent.agent_specific_parameters, TutorParameters):
+                        extracted_tutor_params = agent.agent_specific_parameters
+                        print(f"Extracted titor parameters: {extracted_tutor_params}")
                         break
                     else:
-                        print(f"Warning: question_generator agent found but parameters are not QuizGenParameters type: {type(agent.agent_specific_parameters)}")
+                        print(f"Warning: tutor_agent agent found but parameters are not TutorParameters type: {type(agent.agent_specific_parameters)}")
                 if agent.agent_name == 'respond_to_user':
                     extracted_respond_params = agent.agent_specific_parameters
-                    message_to_user = extracted_respond_params.message_to_user
-                    print(f"Extracted respond parameters: {message_to_user}")
+                    message_to_student = extracted_respond_params.message_to_student
+                    print(f"Extracted respond parameters: {message_to_student}")
                     break
 
-        print("=== Welcome Node End Execution (Success) ===")
+        print("=== Tutor Node End Execution (Success) ===")
 
         # Prepare the return dictionary
         return_state = {
-            "message_to_user": message_to_user,
+            # "message_to_user": message_to_user,
             "node_history": current_state.node_history,
             "handoff_agents": [agent.agent_name for agent in extracted_handoff_agents],
             "handoff_agents_params": [agent.model_dump() for agent in extracted_handoff_agents],
-            "quiz_parameters": extracted_quiz_params.model_dump() if extracted_quiz_params else None,
-            "current_step": "welcome",
-            "welcome_attempts": current_state.welcome_attempts,
+            "current_step": "tutor",
+            "tutor_attempts": current_state.tutor_attempts,
             "error_message": None,
-            "user_input": None,
-            "conversation_history": current_state.conversation_history
+            "conversation_history": current_state.conversation_history,
+            "message_to_student": message_to_student if message_to_student else None
         }
 
         # --- Print State Exiting Node (Success) ---
-        print("\n=== State Exiting Welcome Node (Success) ===")
+        print("\n=== State Exiting Tutor Node (Success) ===")
         print(return_state)
         print("=========================================\n")
         # --- End Print ---
@@ -130,17 +132,17 @@ async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return return_state
     
     except Exception as e:
-        error_msg = f"Error in welcome node: {str(e)}"
+        error_msg = f"Error in tutor node: {str(e)}"
         print(f"Debug - {error_msg}")
 
         # Update node_history with error message
         current_state.node_history.append({
-            "node_name": "welcome",
+            "node_name": "tutor",
             "response": f"Error: {error_msg}"
         })
 
-        logger.info(f"State after error in welcome node: {current_state}")
-        print("=== Welcome Node End Execution (Error) ===")
+        logger.info(f"State after error in tutor node: {current_state}")
+        print("=== Tutor Node End Execution (Error) ===")
 
         # Prepare the return dictionary for error case
         return_state = {
@@ -149,13 +151,12 @@ async def welcome_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "error_message": error_msg,
             "user_input": None,
             "handoff_agents": [],
-            "quiz_parameters": None,
-            "welcome_attempts": current_state.welcome_attempts,
+            "handoff_agents_params": [],
             "conversation_history": current_state.conversation_history
         }
 
         # --- Print State Exiting Node (Error) ---
-        print("\n=== State Exiting Welcome Node (Error) ===")
+        print("\n=== State Exiting tutor Node (Error) ===")
         print(return_state)
         print("=======================================\n")
         # --- End Print ---

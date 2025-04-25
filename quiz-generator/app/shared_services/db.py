@@ -15,36 +15,51 @@ from openai import OpenAI
 from tavily import TavilyClient
 from .logger_setup import setup_logger
 
+# Load environment variables
+load_dotenv()
+
 logger = setup_logger()
 
 
 def get_postgres_connection(table_name: str):
     """
-    Establish and return a connection to the PostgreSQL database.
+    Establish and return a connection to the PostgreSQL database using Supabase direct connection.
+    For direct database connections, we use the connection string from Supabase Dashboard:
+    Settings -> Database -> Connection string -> URI
     
     :param table_name: Name of the table to interact with
     :return: Connection object
     """
-    db_host = os.getenv("DB_HOST", "143.110.249.198").strip()
-    db_user = os.getenv("DB_USER", "postgres").strip()
-    db_password = os.getenv("DB_PASSWORD", "wes@1234").strip()
-    db_port = os.getenv("DB_PORT", "5432").strip()
-    db_name = os.getenv("DB_NAME", "postgres").strip()
+    # Get Supabase connection details from environment variables
+    db_host = os.getenv("PGHOST")  # Host from connection string
+    db_password = os.getenv("PGPASSWORD")  # Password from connection string
+    db_port = os.getenv("5432")
+    db_name = os.getenv("PGDATABASE")
+    db_user = os.getenv("PGUSER")  # User from connection string
+
+
+
+    if not all([db_host, db_password, db_user]):
+        error_msg = "Missing required  database credentials in environment variables"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
 
     try:
+        # Direct PostgreSQL connection to Supabase database
         conn = psycopg2.connect(
             host=db_host,
+            database=db_name,
             user=db_user,
             password=db_password,
-            port=db_port,
-            dbname=db_name
+            port=db_port
+        
         )
-        logger.info(f"Successfully connected to database: {db_name}")
+        logger.info(f"Successfully connected to Supabase database: {db_name}")
         return conn
     except psycopg2.OperationalError as e:
-        logger.error(f"Unable to connect to the database. Error: {e}")
+        logger.error(f"Unable to connect to  database. Error: {e}")
         raise
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
+        logger.error(f"An unexpected error occurred while connecting to Supabase: {e}")
         raise
 
