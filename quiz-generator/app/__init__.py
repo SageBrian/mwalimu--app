@@ -1,3 +1,0 @@
-"""
-Quiz Generator Application Package
-"""
